@@ -246,11 +246,10 @@ static int eval_expression_recursive(const char *expr, const label_entry *labels
         const char *p;
     } ps;
     int64_t value = 0;
-    int sign = 1;
 
     ps.p = expr;
 
-    #define SKIP_SPACE() while (*ps.p && isspace((unsigned char)*ps.p)) ps.p++
+#define SKIP_SPACE() while (*ps.p && isspace((unsigned char)*ps.p)) ps.p++
 
     static int parse_primary(struct parser_state *ps, const label_entry *labels, size_t label_count,
                              size_t current_offset, int64_t *result);
@@ -391,10 +390,9 @@ static int instruction_size(assembler *as, source_statement *stmt,
         int width = strcasecmp(mnemonic, "db") == 0 ? 1 :
                     strcasecmp(mnemonic, "dw") == 0 ? 2 :
                     strcasecmp(mnemonic, "dd") == 0 ? 4 : 8;
-        size_t total = 0;
         char opbuf[MAX_OPERAND_TEXT];
         char *comma;
-        int count = 0;
+        size_t total = 0;
         snprintf(opbuf, sizeof(opbuf), "%s", stmt->operands[0]);
         while (opbuf[0] != '\0') {
             comma = strchr(opbuf, ',');
@@ -403,7 +401,6 @@ static int instruction_size(assembler *as, source_statement *stmt,
             total += (size_t)width;
             if (!comma) break;
             memmove(opbuf, comma + 1, strlen(comma + 1) + 1);
-            count++;
         }
         return (int)total;
     }
@@ -507,20 +504,17 @@ static int encode_immediate_binop(const char *mnemonic, const char *reg_text, in
                                  uint8_t *out, size_t *written) {
     register_info reg;
     int use_short = immediate >= -128 && immediate <= 127;
-    int is_sub = (strcasecmp(mnemonic, "SUB") == 0);
-    int is_and = (strcasecmp(mnemonic, "AND") == 0);
-    int is_or = (strcasecmp(mnemonic, "OR") == 0);
-    int is_xor = (strcasecmp(mnemonic, "XOR") == 0);
-    size_t pos = 0;
     int opcode_reg = 0;
+    size_t pos = 0;
 
     if (parse_register(reg_text, &reg) != 0) return -1;
     if (reg.bits == 64 || reg.extended) out[pos++] = (uint8_t)(0x40 | (reg.bits == 64 ? 8 : 0) | (reg.extended ? 1 : 0));
     out[pos++] = (uint8_t)(use_short ? 0x83 : 0x81);
-    if (is_sub) opcode_reg = 5;
-    else if (is_and) opcode_reg = 4;
-    else if (is_or) opcode_reg = 1;
-    else if (is_xor) opcode_reg = 6;
+    if (strcasecmp(mnemonic, "SUB") == 0) opcode_reg = 5;
+    else if (strcasecmp(mnemonic, "AND") == 0) opcode_reg = 4;
+    else if (strcasecmp(mnemonic, "OR") == 0) opcode_reg = 1;
+    else if (strcasecmp(mnemonic, "XOR") == 0) opcode_reg = 6;
+    else return -1;
     out[pos++] = (uint8_t)(0xc0 | ((opcode_reg & 7) << 3) | (reg.number & 7));
     if (use_short) out[pos++] = (uint8_t)immediate;
     else {
