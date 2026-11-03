@@ -14,6 +14,15 @@
 #define MAX_CODE_SIZE (64U * 1024U * 1024U)
 #define MAX_OPERAND_TEXT 256
 
+#define TOK_PLUS 1
+#define TOK_MINUS 2
+#define TOK_STAR 3
+#define TOK_SLASH 4
+#define TOK_LPAREN 5
+#define TOK_RPAREN 6
+#define TOK_NUMBER 7
+#define TOK_IDENTIFIER 8
+
 typedef struct {
     char label[128];
     char mnemonic[32];
@@ -28,6 +37,12 @@ typedef struct {
     char name[128];
     size_t offset;
 } label_entry;
+
+typedef struct {
+    int number;
+    int bits;
+    int extended;
+} register_info;
 
 struct assembler {
     target_info info;
@@ -93,6 +108,59 @@ static int parse_number(const char *text, int64_t *value) {
     return 0;
 }
 
+static int parse_register(const char *name, register_info *reg) {
+    static const char *names64[] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"};
+    static const char *names32[] = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"};
+    size_t i;
+    char lower[32];
+    size_t n = strlen(name);
+
+    if (n >= sizeof(lower)) return -1;
+    for (i = 0; i <= n; i++) lower[i] = (char)tolower((unsigned char)name[i]);
+
+    for (i = 0; i < 8; i++) {
+        if (strcmp(lower, names64[i]) == 0) {
+            reg->number = (int)i;
+            reg->bits = 64;
+            reg->extended = 0;
+            return 0;
+        }
+        if (strcmp(lower, names32[i]) == 0) {
+            reg->number = (int)i;
+            reg->bits = 32;
+            reg->extended = 0;
+            return 0;
+        }
+    }
+
+    if (lower[0] == 'r' && lower[1] >= '0' && lower[1] <= '9' && lower[2] == '\0') {
+        long number = strtol(lower + 1, NULL, 10);
+        if (number >= 8 && number <= 15) {
+            reg->number = (int)number;
+            reg->bits = 64;
+            reg->extended = 1;
+            return 0;
+        }
+    }
+
+    if (lower[0] == 'r' && lower[1] >= '0' && lower[1] <= '9' && lower[2] == 'd' && lower[3] == '\0') {
+        long number = strtol(lower + 1, NULL, 10);
+        if (number >= 8 && number <= 15) {
+            reg->number = (int)number;
+            reg->bits = 32;
+            reg->extended = 1;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+static int operand_is_register(const char *text) {
+    register_info reg;
+    return parse_register(text, &reg) == 0;
+}
+
 static int add_label(label_entry **labels, size_t *count, size_t *capacity,
                      const char *name, size_t offset) {
     size_t i;
@@ -115,67 +183,6 @@ static int find_label(const label_entry *labels, size_t count, const char *name,
         }
     }
     return -1;
-}
-
-typedef struct {
-    int number;
-    int bits;
-    int extended;
-} register_info;
-
-static int parse_register(const char *name, register_info *reg) {
-    static const char *names64[] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi"};
-    static const char *names32[] = {"eax","ecx","edx","ebx","esp","ebp","esi","edi"};
-    size_t i;
-    char lower[16];
-    size_t n = strlen(name);
-
-    if (n >= sizeof(lower)) return -1;
-    for (i = 0; i <= n; i++) lower[i] = (char)tolower((unsigned char)name[i]);
-
-    for (i = 0; i < 8; i++) {
-        if (strcmp(lower, names64[i]) == 0) {
-            reg->number = (int)i;
-            reg->bits = 64;
-            reg->extended = 0;
-            return 0;
-        }
-        if (strcmp(lower, names32[i]) == 0) {
-            reg->number = (int)i;
-            reg->bits = 32;
-            reg->extended = 0;
-            return 0;
-        }
-    }
-
-    if (lower[0] == 'r' && lower[1] >= '8' && lower[1] <= '9') {
-        char *end;
-        long number = strtol(lower + 1, &end, 10);
-        if (number >= 8 && number <= 15 && *end == '\0') {
-            reg->number = (int)number;
-            reg->bits = 64;
-            reg->extended = 1;
-            return 0;
-        }
-    }
-
-    if (lower[0] == 'r' && lower[1] >= '8' && lower[1] <= '9' && lower[2] == 'd' && lower[3] == '\0') {
-        char *end;
-        long number = strtol(lower + 1, &end, 10);
-        if (number >= 8 && number <= 15 && end == lower + 2) {
-            reg->number = (int)number;
-            reg->bits = 32;
-            reg->extended = 1;
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
-static int operand_is_register(const char *text) {
-    register_info reg;
-    return parse_register(text, &reg) == 0;
 }
 
 static int parse_operands(char *text, source_statement *stmt) {
@@ -233,14 +240,173 @@ static int parse_line(char *line, size_t line_number, source_statement *stmt) {
     return 1;
 }
 
-static int instruction_size(assembler *as, source_statement *stmt) {
+static int eval_expression_recursive(const char *expr, const label_entry *labels, size_t label_count,
+                                    size_t current_offset, int64_t *out_value) {
+    struct parser_state {
+        const char *p;
+    } ps;
+    int64_t value = 0;
+    int sign = 1;
+
+    ps.p = expr;
+
+    #define SKIP_SPACE() while (*ps.p && isspace((unsigned char)*ps.p)) ps.p++
+
+    static int parse_primary(struct parser_state *ps, const label_entry *labels, size_t label_count,
+                             size_t current_offset, int64_t *result);
+    static int parse_unary(struct parser_state *ps, const label_entry *labels, size_t label_count,
+                          size_t current_offset, int64_t *result) {
+        int64_t v = 0;
+        int unary = 1;
+        SKIP_SPACE();
+        if (*ps->p == '+') { ps->p++; SKIP_SPACE(); }
+        if (*ps->p == '-') { unary = -1; ps->p++; SKIP_SPACE(); }
+        if (parse_primary(ps, labels, label_count, current_offset, &v) != 0) return -1;
+        *result = unary * v;
+        return 0;
+    }
+
+    static int parse_term(struct parser_state *ps, const label_entry *labels, size_t label_count,
+                          size_t current_offset, int64_t *result) {
+        int64_t left = 0;
+        int64_t right = 0;
+        if (parse_unary(ps, labels, label_count, current_offset, &left) != 0) return -1;
+        for (;;) {
+            SKIP_SPACE();
+            if (*ps->p == '*') {
+                ps->p++;
+                if (parse_unary(ps, labels, label_count, current_offset, &right) != 0) return -1;
+                left *= right;
+            } else if (*ps->p == '/') {
+                ps->p++;
+                if (parse_unary(ps, labels, label_count, current_offset, &right) != 0) return -1;
+                if (right == 0) return -1;
+                left /= right;
+            } else {
+                break;
+            }
+        }
+        *result = left;
+        return 0;
+    }
+
+    static int parse_expr(struct parser_state *ps, const label_entry *labels, size_t label_count,
+                          size_t current_offset, int64_t *result) {
+        int64_t left = 0;
+        int64_t right = 0;
+        if (parse_term(ps, labels, label_count, current_offset, &left) != 0) return -1;
+        for (;;) {
+            SKIP_SPACE();
+            if (*ps->p == '+') {
+                ps->p++;
+                if (parse_term(ps, labels, label_count, current_offset, &right) != 0) return -1;
+                left += right;
+            } else if (*ps->p == '-') {
+                ps->p++;
+                if (parse_term(ps, labels, label_count, current_offset, &right) != 0) return -1;
+                left -= right;
+            } else {
+                break;
+            }
+        }
+        *result = left;
+        return 0;
+    }
+
+    static int parse_primary(struct parser_state *ps, const label_entry *labels, size_t label_count,
+                             size_t current_offset, int64_t *result) {
+        char ident[128];
+        size_t n = 0;
+        int64_t number = 0;
+        SKIP_SPACE();
+        if (*ps->p == '(') {
+            ps->p++;
+            if (parse_expr(ps, labels, label_count, current_offset, &number) != 0) return -1;
+            SKIP_SPACE();
+            if (*ps->p != ')') return -1;
+            ps->p++;
+            *result = number;
+            return 0;
+        }
+        if (*ps->p == '$') {
+            *result = (int64_t)current_offset;
+            ps->p++;
+            return 0;
+        }
+        if (isdigit((unsigned char)*ps->p) || (ps->p[0] == '0' && ps->p[1] == 'x')) {
+            char *end = NULL;
+            errno = 0;
+            if (ps->p[0] == '0' && (ps->p[1] == 'x' || ps->p[1] == 'X')) {
+                number = strtoll(ps->p, &end, 16);
+            } else {
+                number = strtoll(ps->p, &end, 0);
+            }
+            if (errno == ERANGE || end == ps->p) return -1;
+            ps->p = end;
+            *result = number;
+            return 0;
+        }
+        if (isalpha((unsigned char)*ps->p) || *ps->p == '_' || *ps->p == '.') {
+            while (*ps->p && (isalnum((unsigned char)*ps->p) || *ps->p == '_' || *ps->p == '.')) {
+                if (n + 1 < sizeof(ident)) ident[n++] = *ps->p++;
+                else return -1;
+            }
+            ident[n] = '\0';
+            for (size_t i = 0; i < label_count; i++) {
+                if (strcasecmp(labels[i].name, ident) == 0) {
+                    *result = (int64_t)labels[i].offset;
+                    return 0;
+                }
+            }
+            return -1;
+        }
+        return -1;
+    }
+
+    if (parse_expr(&ps, labels, label_count, current_offset, &value) != 0) return -1;
+    SKIP_SPACE();
+    if (*ps.p != '\0') return -1;
+    *out_value = value;
+    return 0;
+}
+
+static int expression_value(const char *text, const label_entry *labels, size_t label_count,
+                           size_t current_offset, int64_t *value) {
+    if (!text || !value) return -1;
+    return eval_expression_recursive(text, labels, label_count, current_offset, value);
+}
+
+static int instruction_size(assembler *as, source_statement *stmt,
+                            const label_entry *labels, size_t label_count) {
     register_info r1, r2;
-    int64_t immediate;
     char mnemonic[32];
     size_t i;
+    int64_t imm = 0;
 
     for (i = 0; stmt->mnemonic[i]; i++) mnemonic[i] = (char)toupper((unsigned char)stmt->mnemonic[i]);
     mnemonic[i] = '\0';
+
+    if (strcasecmp(mnemonic, "db") == 0 || strcasecmp(mnemonic, "dw") == 0 ||
+        strcasecmp(mnemonic, "dd") == 0 || strcasecmp(mnemonic, "dq") == 0) {
+        int width = strcasecmp(mnemonic, "db") == 0 ? 1 :
+                    strcasecmp(mnemonic, "dw") == 0 ? 2 :
+                    strcasecmp(mnemonic, "dd") == 0 ? 4 : 8;
+        size_t total = 0;
+        char opbuf[MAX_OPERAND_TEXT];
+        char *comma;
+        int count = 0;
+        snprintf(opbuf, sizeof(opbuf), "%s", stmt->operands[0]);
+        while (opbuf[0] != '\0') {
+            comma = strchr(opbuf, ',');
+            if (comma) *comma = '\0';
+            if (expression_value(trim(opbuf), labels, label_count, stmt->offset, &imm) != 0) return -1;
+            total += (size_t)width;
+            if (!comma) break;
+            memmove(opbuf, comma + 1, strlen(comma + 1) + 1);
+            count++;
+        }
+        return (int)total;
+    }
 
     if (strcmp(mnemonic, "NOP") == 0 || strcmp(mnemonic, "RET") == 0) {
         if (stmt->operand_count != 0) return -1;
@@ -252,28 +418,33 @@ static int instruction_size(assembler *as, source_statement *stmt) {
         return 5;
     }
 
-    if (strcmp(mnemonic, "MOV") == 0 || strcmp(mnemonic, "ADD") == 0 || strcmp(mnemonic, "SUB") == 0) {
+    if (strcmp(mnemonic, "MOV") == 0 || strcmp(mnemonic, "ADD") == 0 || strcmp(mnemonic, "SUB") == 0 ||
+        strcmp(mnemonic, "AND") == 0 || strcmp(mnemonic, "OR") == 0 || strcmp(mnemonic, "XOR") == 0) {
         if (stmt->operand_count != 2) return -1;
-
         if (operand_is_register(stmt->operands[1])) {
             if (parse_register(stmt->operands[0], &r1) != 0 || parse_register(stmt->operands[1], &r2) != 0) return -1;
             if (r1.bits != r2.bits) return -1;
             if (as->info.word_size_bits == 64) return 3;
             return 2;
         }
-
         if (parse_register(stmt->operands[0], &r1) != 0) return -1;
+        if (expression_value(stmt->operands[1], labels, label_count, stmt->offset, &imm) != 0) return -1;
         if (r1.bits == 64 && as->info.word_size_bits != 64) return -1;
-        if (parse_number(stmt->operands[1], &immediate) != 0) return -1;
         if (strcmp(mnemonic, "MOV") == 0) {
             if (r1.bits == 64) return 10;
-            if (immediate < INT32_MIN || immediate > UINT32_MAX) return -1;
+            if (imm < INT32_MIN || imm > UINT32_MAX) return -1;
             return 5 + r1.extended;
         }
-        if (r1.bits == 64 && (immediate < INT32_MIN || immediate > INT32_MAX)) return -1;
-        if (immediate >= -128 && immediate <= 127) return 3 + (r1.bits == 64) + r1.extended;
-        if (immediate < INT32_MIN || immediate > INT32_MAX) return -1;
+        if (r1.bits == 64 && (imm < INT32_MIN || imm > INT32_MAX)) return -1;
+        if (imm >= -128 && imm <= 127) return 3 + (r1.bits == 64) + r1.extended;
+        if (imm < INT32_MIN || imm > INT32_MAX) return -1;
         return 6 + (r1.bits == 64) + r1.extended;
+    }
+
+    if (strcmp(mnemonic, "INC") == 0 || strcmp(mnemonic, "DEC") == 0 || strcmp(mnemonic, "NEG") == 0 || strcmp(mnemonic, "NOT") == 0) {
+        if (stmt->operand_count != 1 || parse_register(stmt->operands[0], &r1) != 0) return -1;
+        if (r1.bits == 64) return 3;
+        return 2;
     }
 
     return -1;
@@ -286,17 +457,133 @@ static void write_u32(uint8_t *out, uint32_t value) {
     out[3] = (uint8_t)(value >> 24);
 }
 
+static void write_u16(uint8_t *out, uint16_t value) {
+    out[0] = (uint8_t)value;
+    out[1] = (uint8_t)(value >> 8);
+}
+
+static void write_u64(uint8_t *out, uint64_t value) {
+    for (size_t i = 0; i < 8; i++) out[i] = (uint8_t)(value >> (i * 8));
+}
+
+static int encode_register_move(const char *dst, const char *src, uint8_t *out, size_t *written) {
+    register_info dst_reg, src_reg;
+    if (parse_register(dst, &dst_reg) != 0 || parse_register(src, &src_reg) != 0) return -1;
+    if (dst_reg.bits != src_reg.bits) return -1;
+    if (dst_reg.bits == 64) {
+        out[0] = 0x48;
+        out[1] = 0x8b;
+        out[2] = (uint8_t)(0xc0 | ((src_reg.number & 7) << 3) | (dst_reg.number & 7));
+        *written = 3;
+        return 0;
+    }
+    out[0] = 0x8b;
+    out[1] = (uint8_t)(0xc0 | ((src_reg.number & 7) << 3) | (dst_reg.number & 7));
+    *written = 2;
+    return 0;
+}
+
+static int encode_register_imm(const char *reg_text, int64_t immediate, uint8_t *out, size_t *written) {
+    register_info reg;
+    size_t pos = 0;
+    if (parse_register(reg_text, &reg) != 0) return -1;
+    if (reg.bits == 64) {
+        out[pos++] = (uint8_t)(0x48 | (reg.extended ? 1 : 0));
+        out[pos++] = (uint8_t)(0xb8 + (reg.number & 7));
+        write_u64(out + pos, (uint64_t)immediate);
+        pos += 8;
+        *written = pos;
+        return 0;
+    }
+    if (reg.extended) out[pos++] = 0x41;
+    out[pos++] = (uint8_t)(0xb8 + (reg.number & 7));
+    write_u32(out + pos, (uint32_t)immediate);
+    pos += 4;
+    *written = pos;
+    return 0;
+}
+
+static int encode_immediate_binop(const char *mnemonic, const char *reg_text, int64_t immediate,
+                                 uint8_t *out, size_t *written) {
+    register_info reg;
+    int use_short = immediate >= -128 && immediate <= 127;
+    int is_sub = (strcasecmp(mnemonic, "SUB") == 0);
+    int is_and = (strcasecmp(mnemonic, "AND") == 0);
+    int is_or = (strcasecmp(mnemonic, "OR") == 0);
+    int is_xor = (strcasecmp(mnemonic, "XOR") == 0);
+    size_t pos = 0;
+    int opcode_reg = 0;
+
+    if (parse_register(reg_text, &reg) != 0) return -1;
+    if (reg.bits == 64 || reg.extended) out[pos++] = (uint8_t)(0x40 | (reg.bits == 64 ? 8 : 0) | (reg.extended ? 1 : 0));
+    out[pos++] = (uint8_t)(use_short ? 0x83 : 0x81);
+    if (is_sub) opcode_reg = 5;
+    else if (is_and) opcode_reg = 4;
+    else if (is_or) opcode_reg = 1;
+    else if (is_xor) opcode_reg = 6;
+    out[pos++] = (uint8_t)(0xc0 | ((opcode_reg & 7) << 3) | (reg.number & 7));
+    if (use_short) out[pos++] = (uint8_t)immediate;
+    else {
+        write_u32(out + pos, (uint32_t)immediate);
+        pos += 4;
+    }
+    *written = pos;
+    return 0;
+}
+
+static int encode_inc_dec_not_neg(const char *mnemonic, const char *reg_text, uint8_t *out, size_t *written) {
+    register_info reg;
+    size_t pos = 0;
+    int opcode = 0;
+
+    if (parse_register(reg_text, &reg) != 0) return -1;
+    if (reg.bits == 64 || reg.extended) out[pos++] = (uint8_t)(0x40 | (reg.bits == 64 ? 8 : 0) | (reg.extended ? 1 : 0));
+    out[pos++] = 0xff;
+    if (strcasecmp(mnemonic, "INC") == 0) opcode = 0;
+    else if (strcasecmp(mnemonic, "DEC") == 0) opcode = 1;
+    else if (strcasecmp(mnemonic, "NEG") == 0) opcode = 3;
+    else if (strcasecmp(mnemonic, "NOT") == 0) opcode = 2;
+    else return -1;
+    out[pos++] = (uint8_t)(0xc0 | ((opcode & 7) << 3) | (reg.number & 7));
+    *written = pos;
+    return 0;
+}
+
 static int encode_statement(assembler *as, const source_statement *stmt,
                             const label_entry *labels, size_t label_count,
                             uint8_t *out, size_t *written) {
-    register_info r1, r2;
-    int64_t immediate;
     char mnemonic[32];
     size_t i;
+    int64_t imm = 0;
 
     for (i = 0; stmt->mnemonic[i]; i++) mnemonic[i] = (char)toupper((unsigned char)stmt->mnemonic[i]);
     mnemonic[i] = '\0';
     *written = 0;
+
+    if (strcasecmp(mnemonic, "db") == 0 || strcasecmp(mnemonic, "dw") == 0 ||
+        strcasecmp(mnemonic, "dd") == 0 || strcasecmp(mnemonic, "dq") == 0) {
+        int width = strcasecmp(mnemonic, "db") == 0 ? 1 :
+                    strcasecmp(mnemonic, "dw") == 0 ? 2 :
+                    strcasecmp(mnemonic, "dd") == 0 ? 4 : 8;
+        char opbuf[MAX_OPERAND_TEXT];
+        char *comma;
+        size_t pos = 0;
+        snprintf(opbuf, sizeof(opbuf), "%s", stmt->operands[0]);
+        while (opbuf[0] != '\0') {
+            int64_t value = 0;
+            comma = strchr(opbuf, ',');
+            if (comma) *comma = '\0';
+            if (expression_value(trim(opbuf), labels, label_count, stmt->offset, &value) != 0) return -1;
+            if (width == 1) out[pos++] = (uint8_t)(value & 0xff);
+            else if (width == 2) write_u16(out + pos, (uint16_t)(value & 0xffff)), pos += 2;
+            else if (width == 4) write_u32(out + pos, (uint32_t)(value & 0xffffffffu)), pos += 4;
+            else write_u64(out + pos, (uint64_t)value), pos += 8;
+            if (!comma) break;
+            memmove(opbuf, comma + 1, strlen(comma + 1) + 1);
+        }
+        *written = pos;
+        return 0;
+    }
 
     if (strcmp(mnemonic, "NOP") == 0) {
         out[0] = 0x90;
@@ -311,11 +598,11 @@ static int encode_statement(assembler *as, const source_statement *stmt,
     }
 
     if (strcmp(mnemonic, "JMP") == 0) {
-        size_t destination;
+        size_t destination = 0;
         int64_t displacement;
         if (find_label(labels, label_count, stmt->operands[0], &destination) != 0) {
-            if (parse_number(stmt->operands[0], &immediate) != 0 || immediate < 0 || (uint64_t)immediate > SIZE_MAX) return -1;
-            destination = (size_t)immediate;
+            if (expression_value(stmt->operands[0], labels, label_count, stmt->offset, &imm) != 0) return -1;
+            destination = (size_t)imm;
         }
         displacement = (int64_t)destination - (int64_t)(stmt->offset + 5);
         if (displacement < INT32_MIN || displacement > INT32_MAX) return -1;
@@ -326,55 +613,23 @@ static int encode_statement(assembler *as, const source_statement *stmt,
     }
 
     if (strcmp(mnemonic, "MOV") == 0 && operand_is_register(stmt->operands[1])) {
-        if (parse_register(stmt->operands[0], &r1) != 0 || parse_register(stmt->operands[1], &r2) != 0) return -1;
-        if (r1.bits != r2.bits) return -1;
-        if (r1.bits == 64) {
-            out[0] = 0x48;
-            out[1] = 0x8b;
-            out[2] = (uint8_t)(0xc0 | ((r2.number & 7) << 3) | (r1.number & 7));
-            *written = 3;
-            return 0;
-        }
-        out[0] = 0x8b;
-        out[1] = (uint8_t)(0xc0 | ((r2.number & 7) << 3) | (r1.number & 7));
-        *written = 2;
-        return 0;
+        return encode_register_move(stmt->operands[0], stmt->operands[1], out, written);
     }
-
-    if (parse_register(stmt->operands[0], &r1) != 0) return -1;
-    if (parse_number(stmt->operands[1], &immediate) != 0) return -1;
 
     if (strcmp(mnemonic, "MOV") == 0) {
-        size_t pos = 0;
-        if (r1.bits == 64) out[pos++] = (uint8_t)(0x48 | (r1.extended ? 1 : 0));
-        else if (r1.extended) out[pos++] = 0x41;
-        out[pos++] = (uint8_t)(0xb8 + (r1.number & 7));
-        if (r1.bits == 64) {
-            uint64_t value = (uint64_t)immediate;
-            for (size_t j = 0; j < 8; j++) out[pos++] = (uint8_t)(value >> (j * 8));
-        } else {
-            write_u32(out + pos, (uint32_t)immediate);
-            pos += 4;
-        }
-        *written = pos;
-        return 0;
+        if (expression_value(stmt->operands[1], labels, label_count, stmt->offset, &imm) != 0) return -1;
+        return encode_register_imm(stmt->operands[0], imm, out, written);
     }
 
-    if (strcmp(mnemonic, "ADD") == 0 || strcmp(mnemonic, "SUB") == 0) {
-        int is_sub = strcmp(mnemonic, "SUB") == 0;
-        int use_short = immediate >= -128 && immediate <= 127;
-        size_t pos = 0;
+    if ((strcmp(mnemonic, "ADD") == 0 || strcmp(mnemonic, "SUB") == 0 || strcmp(mnemonic, "AND") == 0 ||
+         strcmp(mnemonic, "OR") == 0 || strcmp(mnemonic, "XOR") == 0) && stmt->operand_count == 2) {
+        if (expression_value(stmt->operands[1], labels, label_count, stmt->offset, &imm) != 0) return -1;
+        return encode_immediate_binop(mnemonic, stmt->operands[0], imm, out, written);
+    }
 
-        if (r1.bits == 64 || r1.extended) out[pos++] = (uint8_t)(0x40 | (r1.bits == 64 ? 8 : 0) | (r1.extended ? 1 : 0));
-        out[pos++] = (uint8_t)(use_short ? 0x83 : 0x81);
-        out[pos++] = (uint8_t)(0xc0 | ((is_sub ? 5 : 0) << 3) | (r1.number & 7));
-        if (use_short) out[pos++] = (uint8_t)immediate;
-        else {
-            write_u32(out + pos, (uint32_t)immediate);
-            pos += 4;
-        }
-        *written = pos;
-        return 0;
+    if ((strcmp(mnemonic, "INC") == 0 || strcmp(mnemonic, "DEC") == 0 || strcmp(mnemonic, "NEG") == 0 ||
+         strcmp(mnemonic, "NOT") == 0) && stmt->operand_count == 1) {
+        return encode_inc_dec_not_neg(mnemonic, stmt->operands[0], out, written);
     }
 
     (void)as;
@@ -383,6 +638,14 @@ static int encode_statement(assembler *as, const source_statement *stmt,
 
 static void assembler_default_target(assembler *as) {
     const target_backend *backend = target_find(TARGET_X86_64);
+    if (!backend) {
+        as->info.name = "x86_64";
+        as->info.target = TARGET_X86_64;
+        as->info.word_size_bits = 64;
+        as->info.address_size_bits = 64;
+        as->info.little_endian = 1;
+        return;
+    }
     as->info.name = (char *)backend->name;
     as->info.target = backend->target;
     as->info.word_size_bits = backend->word_size_bits;
@@ -486,7 +749,7 @@ int assembler_assemble_file(assembler *as, const char *source_path, const char *
         if (!stmt.mnemonic[0]) continue;
         stmt.offset = code_size;
         {
-            int size = instruction_size(as, &stmt);
+            int size = instruction_size(as, &stmt, labels, label_count);
             if (size < 0) {
                 set_error_at(as, line_number, "unsupported instruction or invalid operands for selected target");
                 goto done;
