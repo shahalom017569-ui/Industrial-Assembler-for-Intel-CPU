@@ -313,7 +313,7 @@ static int eval_expression_recursive(const char *expr, const label_entry *labels
     }
 
     static int parse_primary(struct parser_state *ps, const label_entry *labels, size_t label_count,
-                             size_t current_offset, int64_t *result) {
+                            size_t current_offset, int64_t *result) {
         char ident[128];
         size_t n = 0;
         int64_t number = 0;
@@ -800,7 +800,7 @@ int assembler_assemble_file(assembler *as, const char *source_path, const char *
     output = NULL;
     result = 0;
 
-done:
+ done:
     if (source) fclose(source);
     if (output) fclose(output);
     free(line);
