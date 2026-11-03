@@ -1,62 +1,43 @@
 # Industrial Assembler for Intel CPU
 
-A modular assembler framework for multiple Intel CPU targets, designed as a serious engineering project rather than a toy parser.
+A modular, portable C assembler project. The first implementation milestone intentionally provides a small, tested flat-binary assembler for i386 and x86-64; other registered CPU names are not yet encoded and fail with an explicit diagnostic.
 
-## Goals
+## Build and run
 
-- Multi-target x86 family support: 8086/8088, i386, x86-64
-- Additional Intel targets: 8008 and 8085
-- Shared frontend for tokens, labels, expressions, diagnostics, and memory layout
-- Separate CPU backends for encoding and target-specific validation
-- Flat binary output as the initial build target, with future ELF/COFF support
+Requirements: a C11 compiler and `make`.
 
-## Status
-
-This repository currently contains the initial project scaffold and a working assembler core with stubbed CPU target implementations. The code is intended to be extended as the project grows.
-
-## Quick start
-
-```bash
+```sh
 make
 ./bin/assembler --target x86_64 tests/simple.asm -o output.bin
+make test
 ```
 
-## Directory layout
+Accepted target names are `x86_64`/`amd64` and `i386`/`intel_i386`. The 8008, 8085, 8086, and 8088 identifiers are reserved for later backends; selecting one currently reports that encoding is not implemented. The 8088 shares the 8086 instruction set, despite its narrower external data bus.
 
-```text
-include/        Public headers
-src/            Implementation files
-src/targets/    CPU-specific backends
-tests/          Sample inputs and smoke tests
-Makefile        Build configuration
-```
+## Initial syntax and implemented instructions
 
-## Supported targets
+The initial syntax is case-insensitive Intel-style syntax, one instruction per line. `;` starts a comment. Labels use `name:` and can precede an instruction on the same line. Numeric immediates are decimal or `0x`-prefixed hexadecimal.
 
-- Intel 8008
-- Intel 8085
-- Intel 8086 / 8088
-- Intel i386
-- x86-64 (amd64)
+Implemented for i386 and x86-64:
 
-## Design principles
+- `NOP`, `RET`
+- `MOV r32, immediate`; additionally `MOV r64, immediate` in x86-64 mode
+- `ADD` and `SUB` with a 32- or 64-bit general-purpose register and immediate
+- `JMP label` using a near relative 32-bit displacement
 
-- Shared frontend for all targets
-- Target-specific instruction encoders separated by CPU
-- Strict diagnostics instead of silent unsupported behavior
-- Real expression evaluator and symbol table from the start
-- Maintainable architecture for future object file output
+Registers supported: legacy 32-bit registers (`eax` ... `edi`), x86-64 registers (`rax` ... `rdi`), and the corresponding `r8`-`r15` / `r8d`-`r15d` names in x86-64 mode. For 64-bit `ADD`/`SUB`, an immediate must fit a signed 32-bit value, as required by the instruction encoding. No directives, macros, relocatable object files, or MASM compatibility are claimed yet.
+
+## Engineering principles
+
+- Unsupported features produce errors; they must never silently assemble to empty or incorrect output.
+- CPU-specific encoding stays behind target selection, with a shared source reader, label pass, diagnostics, and flat-binary writer.
+- Tests compare exact emitted bytes.
+- Compatibility claims will be limited to features covered by tests and documentation.
 
 ## Roadmap
 
-1. Core lexer and parser
-2. Symbol table and expression handling
-3. CPU target registration and validation
-4. Instruction encoding for a subset of each target
-5. Binary output generation
-6. ELF/COFF output support
-7. Advanced MASM-like compatibility layer (if explicitly desired later)
-
-## License
-
-MIT
+1. Establish a reliable shared assembler core and tested i386/x86-64 instruction subset.
+2. Add expression evaluation, data directives, and robust diagnostic locations.
+3. Expand x86 instruction coverage and add object-file output/relocations.
+4. Implement classic 8008, 8085, and 8086/8088 encoders as independent backends.
+5. Add syntax compatibility layers only with explicit specifications and conformance tests.
