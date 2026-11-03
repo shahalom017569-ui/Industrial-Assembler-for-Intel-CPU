@@ -1,0 +1,50 @@
+#ifndef LEXER_H
+#define LEXER_H
+
+#include <stddef.h>
+
+#define TOKEN_MAX_LEN 128
+
+typedef enum {
+    TOKEN_EOF = 0,
+    TOKEN_IDENTIFIER,
+    TOKEN_NUMBER,
+    TOKEN_COLON,
+    TOKEN_COMMA,
+    TOKEN_PLUS,
+    TOKEN_MINUS,
+    TOKEN_STAR,
+    TOKEN_SLASH,
+    TOKEN_LPAREN,
+    TOKEN_RPAREN,
+    TOKEN_LABEL,
+    TOKEN_DIRECTIVE,
+    TOKEN_STRING,
+    TOKEN_UNKNOWN
+} token_type;
+
+typedef struct {
+    token_type type;
+    char text[TOKEN_MAX_LEN];
+    size_t line;
+    size_t column;
+} token;
+
+typedef struct {
+    token *items;
+    size_t count;
+    size_t capacity;
+} token_list;
+
+typedef struct {
+    const char *source;
+    size_t length;
+    size_t index;
+    size_t line;
+    size_t column;
+} lexer_state;
+
+int lexer_tokenize(const char *source, token_list *out_tokens);
+void lexer_free_tokens(token_list *tokens);
+
+#endif
